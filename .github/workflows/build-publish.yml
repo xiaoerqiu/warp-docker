@@ -1,19 +1,108 @@
 name: Build and publish Docker image
 
 on:
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       GOST_VERSION:
         description: "Version of gost. If empty, the latest version will be used."
         required: false
         type: string
+      FORCE:
+        description: "Build even if an image with these versions already exists."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  actions: write
+
+concurrency:
+  group: build-publish
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
-  build:
+  check:
     runs-on: ubuntu-latest
+    outputs:
+      GOST_VERSION: ${{ steps.versions.outputs.GOST_VERSION }}
+      WARP_VERSION: ${{ steps.versions.outputs.WARP_VERSION }}
+      BUILD: ${{ steps.exists.outputs.BUILD }}
+    steps:
+      # scheduled workflows are disabled after 60 days without repository activity
+      - name: Keep schedule enabled
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow enable build-publish.yml --repo "$GITHUB_REPOSITORY"
+
+      - name: Get versions
+        id: versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_GOST_VERSION: ${{ github.event.inputs.GOST_VERSION }}
+        run: |
+          GOST_VERSION="$INPUT_GOST_VERSION"
+          if [ -z "$GOST_VERSION" ]; then
+            GOST_VERSION=$(gh api repos/go-gost/gost/releases/latest --jq .tag_name | cut -c 2-)
+          fi
+          # gost version must be <number>.<number>.<number>
+          if [[ ! "$GOST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid gost version: $GOST_VERSION"
+            exit 1
+          fi
+          # same release as the ubuntu:22.04 base image
+          WARP_VERSION=$(curl -fsS https://pkg.cloudflareclient.com/dists/jammy/main/binary-amd64/Packages \
+            | awk '/^Package: cloudflare-warp$/{f=1} f&&/^Version:/{print $2; f=0}' | sort -V | tail -1)
+          if [ -z "$WARP_VERSION" ]; then
+            echo "Cannot find WARP version"
+            exit 1
+          fi
+          echo "GOST_VERSION=$GOST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "WARP_VERSION=$WARP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "WARP $WARP_VERSION, GOST $GOST_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log into registry
+        uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # the slim image is pushed last, so its tag means the whole build finished
+      - name: Check for existing image
+        id: exists
+        env:
+          FORCE: ${{ github.event.inputs.FORCE }}
+          TAG: slim-${{ steps.versions.outputs.WARP_VERSION }}-${{ steps.versions.outputs.GOST_VERSION }}
+        run: |
+          if [ "$FORCE" != "true" ] && docker manifest inspect "${IMAGE,,}:$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists, nothing to do" >> "$GITHUB_STEP_SUMMARY"
+            echo "BUILD=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "BUILD=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.BUILD == 'true'
+    runs-on: ubuntu-latest
+    env:
+      GOST_VERSION: ${{ needs.check.outputs.GOST_VERSION }}
+      WARP_VERSION: ${{ needs.check.outputs.WARP_VERSION }}
+      TAG: ${{ needs.check.outputs.WARP_VERSION }}-${{ needs.check.outputs.GOST_VERSION }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Set image name
+        run: echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -23,89 +112,73 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log into registry ${{ vars.REGISTRY }}
+      - name: Log into registry
         uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3.0.0
         with:
-          registry: ${{ vars.REGISTRY }}
-          username: ${{ vars.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get gost version
-        id: get-gost-version
-        run: |
-          if [ -z "${{ github.event.inputs.GOST_VERSION }}" ]; then
-            echo "GOST_VERSION=$(curl -H 'authorization: Bearer ${{ secrets.GITHUB_TOKEN }}' -s https://api.github.com/repos/ginuerzh/gost/releases/latest | jq -r '.tag_name' | cut -c 2-)" >> "$GITHUB_OUTPUT"
-          else
-            echo "GOST_VERSION=${{ github.event.inputs.GOST_VERSION }}" >> "$GITHUB_OUTPUT"
-          fi
-
-      # gost version must be <number>.<number>.<number>
-      - name: Verify gost version
-        id: verify-gost-version
-        run: |
-          if [[ ! "${{ steps.get-gost-version.outputs.GOST_VERSION }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid gost version: ${{ steps.get-gost-version.outputs.GOST_VERSION }}"
-            exit 1
-          fi
-
-      - name: Get WARP client version
-        id: get-warp-client-version
-        run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update
-          echo "WARP_VERSION=$(apt-cache show cloudflare-warp | grep '^Version:' | awk '{print $2}' | sed 's/-[0-9]*$//')" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push
+      - name: Build image for test
         uses: docker/build-push-action@v5
         with:
           build-args: |
-            GOST_VERSION=${{ steps.get-gost-version.outputs.GOST_VERSION }}
-            WARP_VERSION=${{ steps.get-warp-client-version.outputs.WARP_VERSION }}
+            GOST_VERSION=${{ env.GOST_VERSION }}
+            WARP_VERSION=${{ env.WARP_VERSION }}
             COMMIT_SHA=${{ github.sha }}
-            
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: warp-test:default
+
+      - name: Build slim image for test
+        uses: docker/build-push-action@v5
+        with:
+          build-args: |
+            GOST_VERSION=${{ env.GOST_VERSION }}
+            WARP_VERSION=${{ env.WARP_VERSION }}
+            COMMIT_SHA=${{ github.sha }}
+            BASE_IMAGE=debian:bookworm-slim
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: warp-test:slim
+
+      - name: Smoke test
+        run: .github/smoke-test.sh warp-test:default "$WARP_VERSION" "$GOST_VERSION"
+
+      - name: Smoke test slim
+        run: .github/smoke-test.sh warp-test:slim "$WARP_VERSION" "$GOST_VERSION"
+
+      - name: Build and push
+        if: github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v5
+        with:
+          build-args: |
+            GOST_VERSION=${{ env.GOST_VERSION }}
+            WARP_VERSION=${{ env.WARP_VERSION }}
+            COMMIT_SHA=${{ github.sha }}
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:latest
-            ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:${{ steps.get-warp-client-version.outputs.WARP_VERSION }}-${{ steps.get-gost-version.outputs.GOST_VERSION }}
-            ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:${{ steps.get-warp-client-version.outputs.WARP_VERSION }}-${{ steps.get-gost-version.outputs.GOST_VERSION }}-${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ env.TAG }}
+            ${{ env.IMAGE }}:${{ env.TAG }}-${{ github.sha }}
 
       - name: Build and push slim variant
+        if: github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v5
         with:
           build-args: |
-            GOST_VERSION=${{ steps.get-gost-version.outputs.GOST_VERSION }}
-            WARP_VERSION=${{ steps.get-warp-client-version.outputs.WARP_VERSION }}
+            GOST_VERSION=${{ env.GOST_VERSION }}
+            WARP_VERSION=${{ env.WARP_VERSION }}
             COMMIT_SHA=${{ github.sha }}
             BASE_IMAGE=debian:bookworm-slim
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:slim-latest
-            ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:slim-${{ steps.get-warp-client-version.outputs.WARP_VERSION }}-${{ steps.get-gost-version.outputs.GOST_VERSION }}
-            ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:slim-${{ steps.get-warp-client-version.outputs.WARP_VERSION }}-${{ steps.get-gost-version.outputs.GOST_VERSION }}-${{ github.sha }}
-
-      - name: Update WARP version badge
-        if: github.repository == 'cmj2002/warp-docker'
-        uses: Schneegans/dynamic-badges-action@v1.9.0
-        with:
-          auth: ${{ secrets.GIST_TOKEN }}
-          gistID: 3be8f0c02363f9e98dd3048b5174765a
-          filename: warp-version-badge.json
-          label: WARP in image
-          message: ${{ steps.get-warp-client-version.outputs.WARP_VERSION }}
-          color: blue
-
-      - name: Update GOST version badge
-        if: github.repository == 'cmj2002/warp-docker'
-        uses: Schneegans/dynamic-badges-action@v1.9.0
-        with:
-          auth: ${{ secrets.GIST_TOKEN }}
-          gistID: 3be8f0c02363f9e98dd3048b5174765a
-          filename: gost-version-badge.json
-          label: GOST in image
-          message: ${{ steps.get-gost-version.outputs.GOST_VERSION }}
-          color: blue
+            ${{ env.IMAGE }}:slim-latest
+            ${{ env.IMAGE }}:slim-${{ env.TAG }}
+            ${{ env.IMAGE }}:slim-${{ env.TAG }}-${{ github.sha }}

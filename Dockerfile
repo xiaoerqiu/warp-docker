@@ -19,7 +19,7 @@ COPY ./healthcheck /healthcheck
 # install dependencies
 RUN case ${TARGETPLATFORM} in \
       "linux/amd64")   export ARCH="amd64" ;; \
-      "linux/arm64")   export ARCH="armv8" ;; \
+      "linux/arm64")   export ARCH="arm64" ;; \
       *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" && exit 1 ;; \
     esac && \
     echo "Building for ${TARGETPLATFORM} with GOST ${GOST_VERSION}" &&\
@@ -29,30 +29,16 @@ RUN case ${TARGETPLATFORM} in \
     curl https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list && \
     apt-get update && \
-    apt-get install -y cloudflare-warp && \
+    apt-get install -y "cloudflare-warp${WARP_VERSION:+=${WARP_VERSION}}" && \
     apt-get clean && \
     apt-get autoremove -y && \
-    MAJOR_VERSION=$(echo ${GOST_VERSION} | cut -d. -f1) && \
-    MINOR_VERSION=$(echo ${GOST_VERSION} | cut -d. -f2) && \
-    # detect if version >= 2.12.0, which uses new filename syntax
-    if [ "${MAJOR_VERSION}" -ge 3 ] || [ "${MAJOR_VERSION}" -eq 2 -a "${MINOR_VERSION}" -ge 12 ]; then \
-      NAME_SYNTAX="new" && \
-      if [ "${TARGETPLATFORM}" = "linux/arm64" ]; then \
-        ARCH="arm64"; \
-      fi && \
-      FILE_NAME="gost_${GOST_VERSION}_linux_${ARCH}.tar.gz"; \
-    else \
-      NAME_SYNTAX="legacy" && \
-      FILE_NAME="gost-linux-${ARCH}-${GOST_VERSION}.gz"; \
-    fi && \
+    FILE_NAME="gost_${GOST_VERSION}_linux_${ARCH}.tar.gz" && \
     echo "File name: ${FILE_NAME}" && \
-    curl -LO https://github.com/ginuerzh/gost/releases/download/v${GOST_VERSION}/${FILE_NAME} && \
-    if [ "${NAME_SYNTAX}" = "new" ]; then \
-      tar -xzf ${FILE_NAME} -C /usr/bin/ gost; \
-    else \
-      gunzip ${FILE_NAME} && \
-      mv gost-linux-${ARCH}-${GOST_VERSION} /usr/bin/gost; \
-    fi && \
+    curl -fLO https://github.com/go-gost/gost/releases/download/v${GOST_VERSION}/${FILE_NAME} && \
+    curl -fLO https://github.com/go-gost/gost/releases/download/v${GOST_VERSION}/checksums.txt && \
+    grep " ${FILE_NAME}$" checksums.txt | sha256sum -c - && \
+    tar -xzf ${FILE_NAME} -C /usr/bin/ gost && \
+    rm -f ${FILE_NAME} checksums.txt && \
     chmod +x /usr/bin/gost && \
     chmod +x /entrypoint.sh && \
     chmod +x /healthcheck/index.sh && \

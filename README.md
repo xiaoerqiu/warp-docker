@@ -1,13 +1,10 @@
 # warp-docker
 
-[![Docker Pulls](https://img.shields.io/docker/pulls/caomingjun/warp)](https://hub.docker.com/r/caomingjun/warp)
-![WARP version in latest image](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fcmj2002%2F3be8f0c02363f9e98dd3048b5174765a%2Fraw%2Fwarp-version-badge.json)
-![GOST version in latest image](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fcmj2002%2F3be8f0c02363f9e98dd3048b5174765a%2Fraw%2Fgost-version-badge.json)
 
 Run official [Cloudflare WARP](https://1.1.1.1/) client in Docker.
 
 > [!NOTE]
-> Cannot guarantee that the [GOST](https://github.com/ginuerzh/gost) and WARP client contained in the image are the latest versions. If necessary, please [build your own image](#build).
+> This fork uses [GOST v3](https://github.com/go-gost/gost). A daily GitHub Actions job checks for new WARP and GOST releases, then builds, smoke tests and publishes `ghcr.io/xiaoerqiu/warp-docker`.
 
 ## Usage
 
@@ -20,7 +17,7 @@ version: "3"
 
 services:
   warp:
-    image: caomingjun/warp
+    image: ghcr.io/xiaoerqiu/warp-docker
     container_name: warp
     restart: always
     # add removed rule back (https://github.com/opencontainers/runc/pull/3468)
@@ -63,7 +60,7 @@ You can configure the container through the following environment variables:
 
 - `WARP_SLEEP`: The time to wait for the WARP daemon to start, in seconds. The default is 2 seconds. If the time is too short, it may cause the WARP daemon to not start before using the proxy, resulting in the proxy not working properly. If the time is too long, it may cause the container to take too long to start. If your server has poor performance, you can increase this value appropriately.
 - `WARP_LICENSE_KEY`: The license key of the WARP client, which is optional. If you have subscribed to WARP+ service, you can fill in the key in this environment variable. If you have not subscribed to WARP+ service, you can ignore this environment variable.
-- `GOST_ARGS`: The arguments passed to GOST. The default is `-L :1080`, which means to listen on port 1080 in the container at the same time through HTTP and SOCKS5 protocols. If you want to have UDP support or use advanced features provided by other protocols, you can modify this parameter. For more information, refer to [GOST documentation](https://v2.gost.run/en/). If you modify the port number, you may also need to modify the port mapping in the `docker-compose.yml`.
+- `GOST_ARGS`: The arguments passed to GOST. The default is `-L :1080`, which means to listen on port 1080 in the container at the same time through HTTP and SOCKS5 protocols. If you want to have UDP support or use advanced features provided by other protocols, you can modify this parameter. For more information, refer to [GOST documentation](https://gost.run/en/). If you modify the port number, you may also need to modify the port mapping in the `docker-compose.yml`.
 - `REGISTER_WHEN_MDM_EXISTS`: If set, will register consumer account (WARP or WARP+, in contrast to Zero Trust) even when `mdm.xml` exists. You usually don't need this, as `mdm.xml` are usually used for Zero Trust. However, some users may want to adjust advanced settings in `mdm.xml` while still using consumer account.
 - `BETA_FIX_HOST_CONNECTIVITY`: If set, will add checks for host connectivity into healthchecks and automatically fix it if necessary. See [host connectivity issue](docs/host-connectivity.md) for more information.
 - `WARP_ENABLE_NAT`: If set, will work as warp mode and turn NAT on. You can route L3 traffic through `warp-docker` to Warp. See [nat gateway](docs/nat-gateway.md) for more information.
@@ -114,7 +111,7 @@ If you want to build the image locally, you can use [`.github/workflows/build-pu
 
 ### Proxying UDP or even ICMP traffic
 
-The default `GOST_ARGS` is `-L :1080`, which provides HTTP and SOCKS5 proxy. If you want to proxy UDP or even ICMP traffic, you need to change the `GOST_ARGS`. Read the [GOST documentation](https://v2.gost.run/en/) for more information. If you modify the port number, you may also need to modify the port mapping in the `docker-compose.yml`.
+The default `GOST_ARGS` is `-L :1080`, which provides HTTP and SOCKS5 proxy. If you want to proxy UDP or even ICMP traffic, you need to change the `GOST_ARGS`. Read the [GOST documentation](https://gost.run/en/) for more information. If you modify the port number, you may also need to modify the port mapping in the `docker-compose.yml`.
 
 ### How to connect from another container
 
